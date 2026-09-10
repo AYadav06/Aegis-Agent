@@ -1,7 +1,7 @@
-from fastapi  import FastAPI
+from fastapi import FastAPI
 
-app=FastAPI()
+app = FastAPI()
 
 @app.post("/chat")
 def chat():
-    return{"message:","ok"}
+    return {"message": "ok"}
