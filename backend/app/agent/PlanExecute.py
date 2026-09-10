@@ -1,0 +1,202 @@
+import json
+import re
+import sys
+from typing import Any, Dict, List, Optional
+
+from app.client import client
+from app.config import MODEL
+from app.tools import TOOL_REGISTRY
+from app.usage_tracker import UsageTracker
+
+tracker = UsageTracker()
+
+
+def _get_message_content(resp) -> str:
+    """Helper to safely extract text content from response."""
+    if not resp or not getattr(resp, "choices", None):
+        return ""
+    choice = resp.choices[0]
+    msg = getattr(choice, "message", None)
+    if not msg:
+        return ""
+    return msg.content or ""
+
+
+def llm_call(messages: List[Dict[str, str]], tools: Optional[List[dict]] = None):
+    """Wrapper around client.chat.send that records usage automatically."""
+    kwargs = {
+        "model": MODEL,
+        "messages": messages,
+    }
+    if tools:
+        kwargs["tools"] = tools
+    resp = client.chat.send(**kwargs)
+    tracker.record(resp)
+    return resp
+
+
+PLANNER_PROMPT = """You are an expert planner. Given a user task, produce a numbered step-by-step plan to solve it.
+Each numbered step must strictly follow one of these two formats:
+1. Tool call:
+   TOOL: <tool_name> | ARGS: <json_arguments>
+2. Reasoning or synthesis step:
+   THINK: <clear instruction on what to analyze, extract, or decide>
+
+Available tools and their argument schemas:
+- get_weather: {{"city": "<city_name>", "unit": "celsius" | "fahrenheit"}}
+- calculator: {{"operation": "add" | "subtract" | "multiply" | "divide", "a": <number>, "b": <number>}}
+- search: {{"query": "<search query string>"}}
+
+Rules:
+- Output ONLY the numbered steps (e.g. 1. ..., 2. ...). Do not include introductory or concluding conversational text.
+- If a tool step depends on a previous step's result, use placeholders like {{step_1_result}} or specify a THINK step to interpret the output first.
+- Only use tools from the available tools list.
+
+Task: {task}
+"""
+
+
+def plan(task: str) -> List[str]:
+    """PHASE 1: Generate full plan upfront."""
+    resp = llm_call(
+        messages=[
+            {
+                "role": "user",
+                "content": PLANNER_PROMPT.format(task=task),
+            }
+        ]
+    )
+    text = _get_message_content(resp)
+    steps = [
+        s.strip()
+        for s in text.split("\n")
+        if re.match(r"^\d+[\.\)]", s.strip())
+    ]
+    return steps
+
+
+def execute_step(step: str, results: Dict[str, Any]) -> str:
+    """PHASE 2: Execute a single step."""
+    
+    tool_match = re.search(r"TOOL:\s*(\w+)\s*\|\s*ARGS:\s*(\{.*\})", step, re.DOTALL)
+    if tool_match:
+        tool_name, args_json = tool_match.group(1).strip(), tool_match.group(2).strip()
+
+        if tool_name not in TOOL_REGISTRY:
+            return f"Error: Tool '{tool_name}' is not in TOOL_REGISTRY. Available tools: {list(TOOL_REGISTRY.keys())}"
+
+        try:
+            # Substitute placeholders like {step_1_result}
+            for k, v in results.items():
+                placeholder = f"{{{k}}}"
+                if placeholder in args_json:
+                    args_json = args_json.replace(placeholder, str(v))
+
+            parsed_args = json.loads(args_json)
+            result = TOOL_REGISTRY[tool_name](**parsed_args)
+            return json.dumps(result) if not isinstance(result, str) else result
+        except Exception as e:
+            return f"Error executing {tool_name}: {e}"
+
+    # Extract THINK instruction if formatted as THINK: ...
+    think_match = re.search(r"THINK:\s*(.*)", step, re.DOTALL)
+    instruction = think_match.group(1).strip() if think_match else step
+
+    # Otherwise it's a reasoning/THINK step — let the LLM resolve it
+    context = "\n".join(f"{k}: {v}" for k, v in results.items())
+    resp = llm_call(
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    f"Previous results:\n{context}\n\n"
+                    f"Current Step: {instruction}\n"
+                    f"Provide the reasoning and concise result for this step."
+                ),
+            }
+        ]
+    )
+    return _get_message_content(resp).strip()
+
+
+def replan_needed(task: str, results: Dict[str, Any]) -> bool:
+    """PHASE 3 (optional): Check if the plan needs revising."""
+    context = "\n".join(f"{k}: {v}" for k, v in results.items())
+    resp = llm_call(
+        messages=[
+            {
+                "role": "user",
+                "content": f"""Task: {task}
+Results so far:
+{context}
+
+Is the task complete? Answer only YES or NO.""",
+            }
+        ]
+    )
+    content = _get_message_content(resp).upper()
+    return "NO" in content
+
+
+def plan_execute_agent(task: str, allow_replan: bool = True) -> str:
+    tracker.start()
+    results: Dict[str, Any] = {}
+
+    print("=" * 60)
+    print(f"TASK: {task}")
+    print("=" * 60)
+    print("PLAN:")
+    steps = plan(task)
+    if not steps:
+        print("  Warning: No numbered steps generated by planner. Asking LLM for direct resolution.")
+    for i, s in enumerate(steps, 1):
+        print(f"  {i}. {s}")
+
+    # Execute steps in order
+    for i, step in enumerate(steps, 1):
+        print(f"\n--- Executing step {i} ---")
+        result = execute_step(step, results)
+        results[f"step_{i}_result"] = result
+        print(f"  Result: {result[:300]}")
+
+    # Optional re-planning loop
+    if allow_replan:
+        rounds = 0
+        while replan_needed(task, results) and rounds < 2:
+            rounds += 1
+            print(f"\n=== REPLANNING (round {rounds}) ===")
+            new_steps = plan(
+                f"{task}\n\nAlready done:\n"
+                + "\n".join(f"{k}: {v}" for k, v in results.items())
+            )
+            for i, step in enumerate(new_steps, 1):
+                result = execute_step(step, results)
+                results[f"replan_{rounds}_step_{i}"] = result
+                print(f"  {i}. {step[:80]} -> {result[:120]}")
+
+    # Final answer
+    context = "\n".join(f"{k}: {v}" for k, v in results.items())
+    final = llm_call(
+        messages=[
+            {
+                "role": "user",
+                "content": f"Task: {task}\nAll step results:\n{context}\n\nGive the final direct answer to the user.",
+            }
+        ]
+    )
+    final_answer = _get_message_content(final).strip()
+    print(f"\nFINAL ANSWER:\n{final_answer}")
+    print(tracker.report("Plan-and-Execute"))
+    return final_answer
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        task_query = " ".join(sys.argv[1:])
+    else:
+        task_query = (
+            "What is the temperature in London? If it's above 15 degrees, "
+            "calculate how much it is in Fahrenheit, otherwise tell me to bring a jacket."
+        )
+
+    plan_execute_agent(task_query)

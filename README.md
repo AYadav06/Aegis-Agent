@@ -1,6 +1,6 @@
 # Agent Toolkit — Resilient Tool-Using Agent
 
-A tool-calling AI agent built for reliability, not just demos. It plans, calls real tools (search, calculator, SQL, code execution, web browsing), recovers from tool failures, manages its own context window via summarization, and can delegate subtasks to specialized sub-agents through an orchestrator.
+A tool-calling AI agent built for reliability. It plans, calls real tools (search, calculator, weather), recovers from tool failures, manages its own context window via summarization.
 
 This project was built to demonstrate production-oriented agentic AI engineering: handling failure gracefully, comparing architectural approaches with real data, and understanding the new failure modes that appear once an agent can browse the open web.
 
