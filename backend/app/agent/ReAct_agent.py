@@ -3,6 +3,9 @@ from app.client import client
 from app.config import MODEL
 from app.tools.schema import TOOL_SCHEMAS
 from app.tools.registry import TOOL_REGISTRY
+from app.usage_tracker import UsageTracker
+
+tracker = UsageTracker()
 
 SYSTEM_PROMPT = (
     "You are Aegis, an autonomous AI agent that solves tasks using reasoning and tools. "
@@ -62,6 +65,7 @@ def execute_tool_call(tool_name: str, arguments_str: str) -> dict:
 
 
 def run_agent(user_prompt: str, max_iterations: int = 5):
+    tracker.start()
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
@@ -72,6 +76,7 @@ def run_agent(user_prompt: str, max_iterations: int = 5):
 
         # 1. Send conversation history and tool definitions to LLM
         response = client.chat.send(model=MODEL, messages=messages, tools=TOOL_SCHEMAS)
+        tracker.record(response)
         msg = response.choices[0].message
 
         # 2. If the model did not make any tool calls, return final response
@@ -80,6 +85,7 @@ def run_agent(user_prompt: str, max_iterations: int = 5):
             if thought and thought != msg.content:
                 print(f"\n🧠 [Thought / Reason]:\n{thought}")
             print(f"\n🏁 [Final Answer]:\n{msg.content}")
+            print(tracker.report("ReAct"))
             return msg.content
 
         # 3. Append the assistant's message (which contains the tool calls) to history
@@ -136,6 +142,7 @@ def run_agent(user_prompt: str, max_iterations: int = 5):
             )
 
     print("\n Reached max iterations without a final answer.")
+    print(tracker.report("ReAct"))
     return "Agent reached maximum iteration limit."
 
 
