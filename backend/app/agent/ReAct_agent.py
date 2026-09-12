@@ -64,8 +64,9 @@ def execute_tool_call(tool_name: str, arguments_str: str) -> dict:
         return {"error": f"Tool execution failed: {str(e)}"}
 
 
-def run_agent(user_prompt: str, max_iterations: int = 5):
+def run_agent(user_prompt: str, max_iterations: int = 5, return_trace: bool = False):
     tracker.start()
+    trace = []
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
@@ -82,11 +83,18 @@ def run_agent(user_prompt: str, max_iterations: int = 5):
         # 2. If the model did not make any tool calls, return final response
         if not msg.tool_calls:
             thought = get_thought(msg)
-            if thought and thought != msg.content:
+            final_content = msg.content or ""
+            if thought and thought != final_content:
                 print(f"\n🧠 [Thought / Reason]:\n{thought}")
-            print(f"\n🏁 [Final Answer]:\n{msg.content}")
+            print(f"\n🏁 [Final Answer]:\n{final_content}")
             print(tracker.report("ReAct"))
-            return msg.content
+            if return_trace:
+                return {
+                    "answer": final_content,
+                    "trace": trace,
+                    "usage": tracker.to_dict(),
+                }
+            return final_content
 
         # 3. Append the assistant's message (which contains the tool calls) to history
         messages.append(
@@ -119,7 +127,8 @@ def run_agent(user_prompt: str, max_iterations: int = 5):
                 print(f"\n🧠 [Thought / Reason]:\n{thought}")
 
             # Step 2: Action
-            print(f"\n⚡ [Action]:\n{format_action(tool_name, parsed_args)}")
+            action_str = format_action(tool_name, parsed_args)
+            print(f"\n⚡ [Action]:\n{action_str}")
 
             # Execute tool
             tool_result = execute_tool_call(tool_name, tool_args)
@@ -130,6 +139,17 @@ def run_agent(user_prompt: str, max_iterations: int = 5):
             else:
                 obs_str = str(tool_result)
             print(f"\n🔍 [Observation]:\n{obs_str}")
+
+            trace.append(
+                {
+                    "iteration": iteration + 1,
+                    "thought": thought,
+                    "action": action_str,
+                    "tool_name": tool_name,
+                    "tool_args": parsed_args,
+                    "observation": tool_result,
+                }
+            )
 
             # 5. Append the tool output to history with role='tool' and matching tool_call_id
             messages.append(
@@ -143,6 +163,12 @@ def run_agent(user_prompt: str, max_iterations: int = 5):
 
     print("\n Reached max iterations without a final answer.")
     print(tracker.report("ReAct"))
+    if return_trace:
+        return {
+            "answer": "Agent reached maximum iteration limit.",
+            "trace": trace,
+            "usage": tracker.to_dict(),
+        }
     return "Agent reached maximum iteration limit."
 
 

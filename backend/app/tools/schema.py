@@ -34,18 +34,39 @@ TOOL_SCHEMAS = [
             }
         }
     },
- {
-        "type":"function",
-        "function":{
-            "name":"search",
-            "description":"Search the web for a query",
-            "parameters":{
-                "type":"object",
-                "properties":{
-                    "query":{"type":"string","description":"search the query"}
+    {
+        "type": "function",
+        "function": {
+            "name": "search",
+            "description": "Search the web for a query",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "search the query"}
                 },
-                "required":["query"]
-            }
-        }
-    }
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "code_exec",
+            "description": "Execute a Python code snippet in a secure subprocess and return its stdout, stderr, and return code. Use print() to output results. Ideal for multi-step calculations, data processing, algorithms, and logic.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": "The Python code snippet to execute. Must be valid Python code with print() statements to show output.",
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Optional timeout in seconds (default 10, max 30).",
+                    },
+                },
+                "required": ["code"],
+            },
+        },
+    },
 ]

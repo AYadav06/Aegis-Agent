@@ -31,6 +31,15 @@ class UsageTracker:
             return 0.0
         return round(time.time() - self.start_time, 2)
 
+    def to_dict(self) -> dict:
+        return {
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+            "llm_calls": self.llm_calls,
+            "elapsed": self.elapsed,
+        }
+
     def report(self, agent_name: str = "Agent") -> str:
         return (
             f"\n[{agent_name}] "
