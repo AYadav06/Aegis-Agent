@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 sandbox/
 docs
+benchmark_results.json
