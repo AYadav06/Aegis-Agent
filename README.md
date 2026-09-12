@@ -21,6 +21,66 @@
 
 ---
 
+## Architectural Benchmarks & Tradeoffs
+
+Aegis includes an automated benchmarking suite in [`backend/app/run_benchmark.py`](backend/app/run_benchmark.py) to measure real production trade-offs between reactive and planning architectures across 10 distinct task archetypes.
+
+### Empirical Metrics & Results
+
+| Task ID | Architecture | Success | LLM Calls | Tool Steps | Prompt Tokens | Completion Tokens | Total Tokens | Latency (s) | Key Observation |
+|:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---|
+| **T01** (Basic Math) | **ReAct** | 100% | 2 | 1 | 1,637 | 140 | 1,777 | 8.80s | Immediate tool dispatch on turn 1 |
+| | **Plan→Execute** | 100% | 2 | 1 | 356 | 1,123 | 1,479 | 12.68s | Generates plan first, then executes tool |
+| **T02** (Chained Math) | **ReAct** | 100% | 3 | 2 | 2,602 | 318 | 2,920 | 7.59s | Re-sends full history per step (high prompt tokens) |
+| | **Plan→Execute** | 100% | 2 | 2 | 397 | 1,361 | 1,758 | 43.14s | Maps `{step_1_result}` cleanly across steps |
+| **T03** (Code Exec) | **ReAct** | 100% | 2 | 1 | 1,772 | 330 | 2,102 | 27.87s | Generates and runs Python snippet in 1 iteration |
+| | **Plan→Execute** | 100% | 2 | 1 | 362 | 1,215 | 1,577 | 34.20s | Plans code structure upfront, then executes |
+| **T04** (String Parsing)| **ReAct** | 100% | 2 | 1 | 1,760 | 295 | 2,055 | 18.45s | High prompt context due to tool schema injection |
+| | **Plan→Execute** | 100% | 2 | 1 | 358 | 1,180 | 1,538 | 29.10s | 79% fewer prompt tokens than ReAct |
+| **T05** (Live Weather) | **ReAct** | 100% | 2 | 1 | 1,642 | 185 | 1,827 | 9.12s | Fast direct lookup |
+| | **Plan→Execute** | 100% | 2 | 1 | 351 | 1,098 | 1,449 | 14.50s | Plans single-step weather lookup |
+| **T06** (Comparative) | **ReAct** | 100% | 3 | 2 | 2,750 | 380 | 3,130 | 16.40s | Chains two API calls dynamically |
+| | **Plan→Execute** | 100% | 3 | 2 | 410 | 1,490 | 1,900 | 48.20s | Generates 2-tool plan + synthesis step |
+| **T07** (Weather+Math) | **ReAct** | 100% | 3 | 2 | 2,710 | 345 | 3,055 | 15.80s | Pulls temperature then feeds into calculator |
+| | **Plan→Execute** | 100% | 3 | 2 | 405 | 1,450 | 1,855 | 45.10s | Replaces `{step_1_result}` temperature into math step |
+| **T08** (Web Search) | **ReAct** | 100% | 2 | 1 | 1,810 | 290 | 2,100 | 12.30s | Reads Tavily snippet and synthesizes directly |
+| | **Plan→Execute** | 100% | 2 | 1 | 370 | 1,280 | 1,650 | 22.40s | Dispatches search tool then summarizes result |
+| **T09** (Search+Math) | **ReAct** | 100% | 3 | 2 | 2,890 | 360 | 3,250 | 17.50s | Discovers population then calls calculator |
+| | **Plan→Execute** | 100% | 3 | 2 | 425 | 1,520 | 1,945 | 49.80s | Plan separates entity search from calculation |
+| **T10** (Multi-Pipeline)| **ReAct** | 100% | 3 | 2 | 2,940 | 410 | 3,350 | 28.60s | Searches speed of light then runs Python simulation |
+| | **Plan→Execute** | 100% | 3 | 2 | 440 | 1,610 | 2,050 | 52.30s | Generates end-to-end multi-tool workflow |
+
+### Architectural Findings & Trade-Offs
+
+1. **Prompt Token Amplification in ReAct:**
+   - On multi-step tasks (T02, T06, T07, T09, T10), **ReAct consumes 40% to 75% more total tokens** and **up to 7x more prompt tokens** than Plan→Execute.
+   - *Reason:* ReAct sends the full system prompt, all 4 tool schemas, and cumulative history back to the model on *every single iteration*. As conversation turns increase, token consumption grows quadratically.
+2. **Deterministic Orchestration in Plan→Execute:**
+   - **Plan→Execute maintains nearly constant prompt token overhead** (~350–440 tokens per step). Once the plan is established, intermediate tool executions (like Python scripts or calculator operations) execute deterministically without re-invoking the LLM until synthesis.
+3. **Latency Profile:**
+   - **ReAct achieves 2x–3x lower wall-clock latency** on straightforward tasks. Because ReAct does not produce a comprehensive upfront plan, it executes tools on turn 1.
+   - Plan→Execute produces more reasoning/completion tokens during planning and synthesis, which increases time-to-first-token on models with extended thinking.
+4. **Production Decision Matrix:**
+   - **Choose ReAct for:** Interactive conversational queries, exploratory web research, or open-ended troubleshooting where subsequent steps cannot be anticipated.
+   - **Choose Plan→Execute for:** Complex, deterministic pipelines, multi-step code calculations, and cost-critical background workloads where token minimization is the priority.
+
+### The 10 Benchmark Tasks
+
+| ID | Category | Description | Tools Exercised | Task Query |
+|:---|:---|:---|:---|:---|
+| **T01** | Basic Arithmetic | Single-step division | `calculator` | *"What is 1542 divided by 6?"* |
+| **T02** | Chained Math | Two-step sequential dependency (multiply then divide) | `calculator` | *"First multiply 14 by 15, then take that result and divide it by 7."* |
+| **T03** | Code Execution | Algorithmic logic (prime number filtering & sum) | `code_exec` | *"Write and execute Python code to find the sum of all prime numbers strictly below 30."* |
+| **T04** | String Processing | Non-trivial string mutation & word reversal | `code_exec` | *"Use Python code execution to reverse the words in the string 'production grade resilient autonomous agent'."* |
+| **T05** | Live Weather | Real-time weather lookup via geocoding | `get_weather` | *"What is the current temperature in Berlin in celsius?"* |
+| **T06** | Comparative Weather | Multi-entity retrieval and comparative analysis | `get_weather` | *"Compare the current temperatures of Tokyo and Paris in celsius. Which city is warmer and by how much?"* |
+| **T07** | Weather + Math | Live entity retrieval chained into mathematical scaling | `get_weather`, `calculator` | *"Get the temperature of London in celsius, then calculate what that temperature is multiplied by 1.8."* |
+| **T08** | Web Search | Factual retrieval from the open web | `search` | *"Search for who won the ICC Men's T20 World Cup in 2024 and which team was the runner up."* |
+| **T09** | Search + Math | Data retrieval chained into percentage calculation | `search`, `calculator` | *"Search for the current population of Iceland, then use the calculator to compute 5 percent of that population."* |
+| **T10** | Multi-Tool Pipeline | Factual constant retrieval feeding into physics simulation | `search`, `code_exec` | *"Search for the speed of light in vacuum in m/s, then use Python code execution to calculate how many seconds light takes to travel 384,400 km to the Moon."* |
+
+---
+
 ## Architecture Overview
 
 ```mermaid
@@ -164,6 +224,25 @@ uv run uvicorn app.main:app --reload --port 8000
 
 Interactive Swagger documentation is available at `http://localhost:8000/docs`.
 
+### 5. Running the Benchmarks
+
+```bash
+cd backend
+
+# Run the complete 10-task benchmark suite
+uv run python -m app.run_benchmark
+
+# Run a specific task by ID (e.g. T01, T03)
+uv run python -m app.run_benchmark --task T01
+
+# Test only a specific architecture ('react' or 'plan_execute')
+uv run python -m app.run_benchmark --mode react
+
+# Reset previous results and run fresh
+uv run python -m app.run_benchmark --reset
+```
+
+
 ---
 
 ## API Documentation
@@ -260,84 +339,6 @@ uv run python -m app.agent.ReAct_agent "What is 1542 divided by 6?"
 # Run Plan-and-Execute agent directly
 uv run python -m app.agent.PlanExecute "What is the temperature in London? If above 15C, calculate Fahrenheit."
 ```
-
----
-
-## Architectural Benchmarks & Tradeoffs
-
-Aegis includes an automated benchmarking suite in [`backend/app/run_benchmark.py`](backend/app/run_benchmark.py) to measure real production trade-offs between reactive and planning architectures across 10 distinct task archetypes.
-
-### Running the Benchmarks
-
-```bash
-cd backend
-
-# Run the complete 10-task benchmark suite
-uv run python -m app.run_benchmark
-
-# Run a specific task by ID (e.g. T01, T03)
-uv run python -m app.run_benchmark --task T01
-
-# Test only a specific architecture ('react' or 'plan_execute')
-uv run python -m app.run_benchmark --mode react
-
-# Reset previous results and run fresh
-uv run python -m app.run_benchmark --reset
-```
-
-### The 10 Benchmark Tasks
-
-| ID | Category | Description | Tools Exercised | Task Query |
-|:---|:---|:---|:---|:---|
-| **T01** | Basic Arithmetic | Single-step division | `calculator` | *"What is 1542 divided by 6?"* |
-| **T02** | Chained Math | Two-step sequential dependency (multiply then divide) | `calculator` | *"First multiply 14 by 15, then take that result and divide it by 7."* |
-| **T03** | Code Execution | Algorithmic logic (prime number filtering & sum) | `code_exec` | *"Write and execute Python code to find the sum of all prime numbers strictly below 30."* |
-| **T04** | String Processing | Non-trivial string mutation & word reversal | `code_exec` | *"Use Python code execution to reverse the words in the string 'production grade resilient autonomous agent'."* |
-| **T05** | Live Weather | Real-time weather lookup via geocoding | `get_weather` | *"What is the current temperature in Berlin in celsius?"* |
-| **T06** | Comparative Weather | Multi-entity retrieval and comparative analysis | `get_weather` | *"Compare the current temperatures of Tokyo and Paris in celsius. Which city is warmer and by how much?"* |
-| **T07** | Weather + Math | Live entity retrieval chained into mathematical scaling | `get_weather`, `calculator` | *"Get the temperature of London in celsius, then calculate what that temperature is multiplied by 1.8."* |
-| **T08** | Web Search | Factual retrieval from the open web | `search` | *"Search for who won the ICC Men's T20 World Cup in 2024 and which team was the runner up."* |
-| **T09** | Search + Math | Data retrieval chained into percentage calculation | `search`, `calculator` | *"Search for the current population of Iceland, then use the calculator to compute 5 percent of that population."* |
-| **T10** | Multi-Tool Pipeline | Factual constant retrieval feeding into physics simulation | `search`, `code_exec` | *"Search for the speed of light in vacuum in m/s, then use Python code execution to calculate how many seconds light takes to travel 384,400 km to the Moon."* |
-
-### Empirical Metrics & Results
-
-| Task ID | Architecture | Success | LLM Calls | Tool Steps | Prompt Tokens | Completion Tokens | Total Tokens | Latency (s) | Key Observation |
-|:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---|
-| **T01** (Basic Math) | **ReAct** | 100% | 2 | 1 | 1,637 | 140 | 1,777 | 8.80s | Immediate tool dispatch on turn 1 |
-| | **Plan→Execute** | 100% | 2 | 1 | 356 | 1,123 | 1,479 | 12.68s | Generates plan first, then executes tool |
-| **T02** (Chained Math) | **ReAct** | 100% | 3 | 2 | 2,602 | 318 | 2,920 | 7.59s | Re-sends full history per step (high prompt tokens) |
-| | **Plan→Execute** | 100% | 2 | 2 | 397 | 1,361 | 1,758 | 43.14s | Maps `{step_1_result}` cleanly across steps |
-| **T03** (Code Exec) | **ReAct** | 100% | 2 | 1 | 1,772 | 330 | 2,102 | 27.87s | Generates and runs Python snippet in 1 iteration |
-| | **Plan→Execute** | 100% | 2 | 1 | 362 | 1,215 | 1,577 | 34.20s | Plans code structure upfront, then executes |
-| **T04** (String Parsing)| **ReAct** | 100% | 2 | 1 | 1,760 | 295 | 2,055 | 18.45s | High prompt context due to tool schema injection |
-| | **Plan→Execute** | 100% | 2 | 1 | 358 | 1,180 | 1,538 | 29.10s | 79% fewer prompt tokens than ReAct |
-| **T05** (Live Weather) | **ReAct** | 100% | 2 | 1 | 1,642 | 185 | 1,827 | 9.12s | Fast direct lookup |
-| | **Plan→Execute** | 100% | 2 | 1 | 351 | 1,098 | 1,449 | 14.50s | Plans single-step weather lookup |
-| **T06** (Comparative) | **ReAct** | 100% | 3 | 2 | 2,750 | 380 | 3,130 | 16.40s | Chains two API calls dynamically |
-| | **Plan→Execute** | 100% | 3 | 2 | 410 | 1,490 | 1,900 | 48.20s | Generates 2-tool plan + synthesis step |
-| **T07** (Weather+Math) | **ReAct** | 100% | 3 | 2 | 2,710 | 345 | 3,055 | 15.80s | Pulls temperature then feeds into calculator |
-| | **Plan→Execute** | 100% | 3 | 2 | 405 | 1,450 | 1,855 | 45.10s | Replaces `{step_1_result}` temperature into math step |
-| **T08** (Web Search) | **ReAct** | 100% | 2 | 1 | 1,810 | 290 | 2,100 | 12.30s | Reads Tavily snippet and synthesizes directly |
-| | **Plan→Execute** | 100% | 2 | 1 | 370 | 1,280 | 1,650 | 22.40s | Dispatches search tool then summarizes result |
-| **T09** (Search+Math) | **ReAct** | 100% | 3 | 2 | 2,890 | 360 | 3,250 | 17.50s | Discovers population then calls calculator |
-| | **Plan→Execute** | 100% | 3 | 2 | 425 | 1,520 | 1,945 | 49.80s | Plan separates entity search from calculation |
-| **T10** (Multi-Pipeline)| **ReAct** | 100% | 3 | 2 | 2,940 | 410 | 3,350 | 28.60s | Searches speed of light then runs Python simulation |
-| | **Plan→Execute** | 100% | 3 | 2 | 440 | 1,610 | 2,050 | 52.30s | Generates end-to-end multi-tool workflow |
-
-### Architectural Findings & Trade-Offs
-
-1. **Prompt Token Amplification in ReAct:**
-   - On multi-step tasks (T02, T06, T07, T09, T10), **ReAct consumes 40% to 75% more total tokens** and **up to 7x more prompt tokens** than Plan→Execute.
-   - *Reason:* ReAct sends the full system prompt, all 4 tool schemas, and cumulative history back to the model on *every single iteration*. As conversation turns increase, token consumption grows quadratically.
-2. **Deterministic Orchestration in Plan→Execute:**
-   - **Plan→Execute maintains nearly constant prompt token overhead** (~350–440 tokens per step). Once the plan is established, intermediate tool executions (like Python scripts or calculator operations) execute deterministically without re-invoking the LLM until synthesis.
-3. **Latency Profile:**
-   - **ReAct achieves 2x–3x lower wall-clock latency** on straightforward tasks. Because ReAct does not produce a comprehensive upfront plan, it executes tools on turn 1.
-   - Plan→Execute produces more reasoning/completion tokens during planning and synthesis, which increases time-to-first-token on models with extended thinking.
-4. **Production Decision Matrix:**
-   - **Choose ReAct for:** Interactive conversational queries, exploratory web research, or open-ended troubleshooting where subsequent steps cannot be anticipated.
-   - **Choose Plan→Execute for:** Complex, deterministic pipelines, multi-step code calculations, and cost-critical background workloads where token minimization is the priority.
 
 ---
 
