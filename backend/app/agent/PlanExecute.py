@@ -46,6 +46,7 @@ Available tools and their argument schemas:
 - get_weather: {{"city": "<city_name>", "unit": "celsius" | "fahrenheit"}}
 - calculator: {{"operation": "add" | "subtract" | "multiply" | "divide", "a": <number>, "b": <number>}}
 - search: {{"query": "<search query string>"}}
+- code_exec: {{"code": "<valid python code string, use print() for output>"}}
 
 Rules:
 - Output ONLY the numbered steps (e.g. 1. ..., 2. ...). Do not include introductory or concluding conversational text.
@@ -138,9 +139,10 @@ Is the task complete? Answer only YES or NO.""",
     return "NO" in content
 
 
-def plan_execute_agent(task: str, allow_replan: bool = True) -> str:
+def plan_execute_agent(task: str, allow_replan: bool = True, return_trace: bool = False):
     tracker.start()
     results: Dict[str, Any] = {}
+    trace: List[Dict[str, Any]] = []
 
     print("=" * 60)
     print(f"TASK: {task}")
@@ -158,6 +160,14 @@ def plan_execute_agent(task: str, allow_replan: bool = True) -> str:
         result = execute_step(step, results)
         results[f"step_{i}_result"] = result
         print(f"  Result: {result[:300]}")
+        trace.append(
+            {
+                "phase": "initial_plan",
+                "step_index": i,
+                "step_raw": step,
+                "result": result,
+            }
+        )
 
     # Optional re-planning loop
     if allow_replan:
@@ -173,6 +183,14 @@ def plan_execute_agent(task: str, allow_replan: bool = True) -> str:
                 result = execute_step(step, results)
                 results[f"replan_{rounds}_step_{i}"] = result
                 print(f"  {i}. {step[:80]} -> {result[:120]}")
+                trace.append(
+                    {
+                        "phase": f"replan_round_{rounds}",
+                        "step_index": i,
+                        "step_raw": step,
+                        "result": result,
+                    }
+                )
 
     # Final answer
     context = "\n".join(f"{k}: {v}" for k, v in results.items())
@@ -187,6 +205,14 @@ def plan_execute_agent(task: str, allow_replan: bool = True) -> str:
     final_answer = _get_message_content(final).strip()
     print(f"\nFINAL ANSWER:\n{final_answer}")
     print(tracker.report("Plan-and-Execute"))
+
+    if return_trace:
+        return {
+            "answer": final_answer,
+            "plan": steps,
+            "trace": trace,
+            "usage": tracker.to_dict(),
+        }
     return final_answer
 
 
